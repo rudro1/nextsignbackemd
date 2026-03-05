@@ -984,7 +984,7 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// Payload Limits
+// ✅ Request limits for large signatures
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
@@ -995,22 +995,18 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ FIX: Force IPv4 (family: 4) to avoid ENETUNREACH error
+// ✅ SMTP Config: Optimized for Render (Port 587)
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
-  port: 465, // Port 465 usually more stable for SSL
-  secure: true,
+  port: 587,
+  secure: false,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS 
   },
-  tls: {
-    rejectUnauthorized: false
-  },
-  connectionTimeout: 10000, // 10s
-  socketTimeout: 10000,
-  dnsTimeout: 10000,
-  family: 4 // ✅ FORCE IPv4 ONLY
+  tls: { rejectUnauthorized: false },
+  connectionTimeout: 15000, 
+  family: 4 // Force IPv4
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -1030,7 +1026,7 @@ const Document = mongoose.model('Document', documentSchema);
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected"));
 
-// 1. Submit Sign (Non-blocking Email)
+// 1. Submit Sign (OTP Route)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1042,24 +1038,30 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             tempSignData: signaturesMap
         });
 
-        // ✅ Non-blocking email: Don't 'await' it so frontend doesn't stick
+        // ✅ IMPORTANT: Render Logs-e OTP print hobe (Jodi mail na ashe)
+        console.log("-----------------------------------------");
+        console.log(`🔑 OTP FOR ${email} IS: ${otpCode}`);
+        console.log("-----------------------------------------");
+
+        // Background email attempt (Non-blocking)
         transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code",
             html: `<div style="padding:20px; border:1px solid #ddd;"><h2>OTP: ${otpCode}</h2></div>`
-        }).catch(err => console.error("Async Mail Error:", err.message));
+        }).then(() => console.log("✅ Mail Sent!"))
+          .catch(err => console.error("❌ Mail Error:", err.message));
 
-        // Send response immediately
-        res.json({ message: "OTP Sent" });
+        // Immediately respond to stop loading
+        return res.json({ message: "Success", otpSent: true });
 
     } catch (e) { 
-        console.error("Submit Route Error:", e.message);
-        res.status(500).json({ error: "Server error" }); 
+        console.error("Route Error:", e.message);
+        res.status(500).json({ error: "Server Error" }); 
     }
 });
 
-// 2. Verify OTP
+// 2. Verify OTP & PDF Merge
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
@@ -1095,19 +1097,14 @@ app.post('/api/verify-otp', async (req, res) => {
         doc.tempSignData = null;
         await doc.save();
 
-        // Final Email (Non-blocking)
-        transporter.sendMail({
-            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
-            to: doc.signerEmail,
-            subject: `Signed: ${doc.name}`,
-            attachments: [{ filename: `Signed_${doc.name}.pdf`, content: Buffer.from(pdfBuffer) }]
-        }).catch(e => console.log("Final Mail Error"));
-
         res.json({ pdf: cldRes.secure_url });
-    } catch (e) { res.status(500).json({ error: "Merge failed" }); }
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Merge failed" }); 
+    }
 });
 
-// Admin Routes
+// Admin API
 app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
     try {
         const b64 = Buffer.from(req.file.buffer).toString("base64");
