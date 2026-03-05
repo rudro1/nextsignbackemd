@@ -984,29 +984,25 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ Request limits for large signatures
+// ✅ Step 1: Payload limits for large PDF/Signature data
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
+// Cloudinary
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ SMTP Config: Optimized for Render (Port 587)
+// ✅ Step 2: Optimized Production Mailer (Gmail Service)
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
+  service: 'gmail', // Standard for Production Gmail
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS 
-  },
-  tls: { rejectUnauthorized: false },
-  connectionTimeout: 15000, 
-  family: 4 // Force IPv4
+    pass: process.env.EMAIL_PASS // ⚠️ Must be 16-digit App Password
+  }
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -1026,7 +1022,9 @@ const Document = mongoose.model('Document', documentSchema);
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected"));
 
-// 1. Submit Sign (OTP Route)
+// --- ROUTES ---
+
+// 1. Submit Sign & Send OTP
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1038,36 +1036,41 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             tempSignData: signaturesMap
         });
 
-        // ✅ IMPORTANT: Render Logs-e OTP print hobe (Jodi mail na ashe)
-        console.log("-----------------------------------------");
-        console.log(`🔑 OTP FOR ${email} IS: ${otpCode}`);
-        console.log("-----------------------------------------");
-
-        // Background email attempt (Non-blocking)
+        // ✅ Step 3: Send Mail in Background (Don't 'await' it)
+        // Ete kore mail slow thakleo frontend loading-e stuck hobe na
         transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: "Verification Code",
-            html: `<div style="padding:20px; border:1px solid #ddd;"><h2>OTP: ${otpCode}</h2></div>`
-        }).then(() => console.log("✅ Mail Sent!"))
-          .catch(err => console.error("❌ Mail Error:", err.message));
+            subject: "Verification Code for Document Signing",
+            html: `<div style="font-family: Arial; padding: 20px; border: 1px solid #eee; border-radius: 10px; text-align: center;">
+                    <h2 style="color: #0284c7;">FixenSysign OTP</h2>
+                    <p>Your verification code is:</p>
+                    <h1 style="letter-spacing: 5px; color: #333;">${otpCode}</h1>
+                    <p style="font-size: 12px; color: #888;">If you didn't request this, please ignore.</p>
+                   </div>`
+        }).then(() => console.log(`✅ OTP Sent to ${email}`))
+          .catch(err => console.error("❌ Mail Transport Error:", err.message));
 
-        // Immediately respond to stop loading
-        return res.json({ message: "Success", otpSent: true });
+        // Response pathiye frontend loading off kora
+        res.status(200).json({ success: true, message: "OTP Sent" });
 
-    } catch (e) { 
-        console.error("Route Error:", e.message);
-        res.status(500).json({ error: "Server Error" }); 
+    } catch (e) {
+        console.error("Submit Error:", e.message);
+        res.status(500).json({ error: "Internal Server Error" });
     }
 });
 
-// 2. Verify OTP & PDF Merge
+// 2. Verify OTP & Process PDF
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
         const doc = await Document.findById(id);
-        if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
 
+        if (!doc || doc.otp !== otp) {
+            return res.status(400).json({ error: "Invalid Verification Code" });
+        }
+
+        // PDF Processing
         const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
         const pdfDoc = await PDFDocument.load(pdfBytes);
         
@@ -1087,6 +1090,8 @@ app.post('/api/verify-otp', async (req, res) => {
 
         const pdfBuffer = await pdfDoc.save(); 
         const b64Signed = Buffer.from(pdfBuffer).toString('base64');
+        
+        // Upload to Cloudinary
         const cldRes = await cloudinary.uploader.upload(`data:application/pdf;base64,${b64Signed}`, {
             resource_type: "auto", folder: "signed_docs"
         });
@@ -1100,11 +1105,11 @@ app.post('/api/verify-otp', async (req, res) => {
         res.json({ pdf: cldRes.secure_url });
     } catch (e) { 
         console.error(e);
-        res.status(500).json({ error: "Merge failed" }); 
+        res.status(500).json({ error: "PDF Processing Failed" }); 
     }
 });
 
-// Admin API
+// Other Admin Routes
 app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
     try {
         const b64 = Buffer.from(req.file.buffer).toString("base64");
@@ -1130,4 +1135,4 @@ app.get('/api/documents', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5011;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on Port ${PORT}`));
