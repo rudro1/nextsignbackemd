@@ -984,36 +984,38 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ FIX 1: Increase JSON limit (Signature image boro hole eita chara load hotei thakbe)
+// ✅ FIX 1: Increase JSON limit to handle large signatures
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// ✅ FIX 2: Standard CORS for Render to Vercel
 app.use(cors({
   origin: '*', 
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type']
 }));
 
-// Cloudinary Config
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// Mail Transporter
+// ✅ FIX 2: Better Mail Transporter for Render (Using Port 587)
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false, // Port 587 er jonno false thakte hobe
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS 
+  },
+  tls: {
+    rejectUnauthorized: false // Connection block hobe na
   }
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Schema
 const documentSchema = new mongoose.Schema({
   pdfPath: String,
   signedPdf: String, 
@@ -1027,47 +1029,43 @@ const documentSchema = new mongoose.Schema({
 
 const Document = mongoose.model('Document', documentSchema);
 
-// DB Connection
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ DB Connected"))
   .catch(err => console.error("❌ DB Error:", err));
 
-// --- API ROUTES ---
-
-// 1. Submit Sign (OTP) - Fixed Timeout
+// 1. Submit Sign (OTP)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
 
-        const doc = await Document.findByIdAndUpdate(req.params.id, {
+        await Document.findByIdAndUpdate(req.params.id, {
             signerEmail: email,
             otp: otpCode,
             tempSignData: signaturesMap
         });
 
-        if (!doc) return res.status(404).json({ error: "Document not found" });
-
+        // OTP Send
         await transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code",
-            html: `<h3>Your Verification Code: ${otpCode}</h3>`
+            text: `Your code is ${otpCode}`,
+            html: `<b>Code: ${otpCode}</b>`
         });
 
         res.json({ message: "OTP Sent" });
     } catch (e) { 
         console.error("Submit Error:", e.message);
-        res.status(500).json({ error: "Email or DB Error" }); 
+        res.status(500).json({ error: "Email failed", detail: e.message }); 
     }
 });
 
-// 2. Verify OTP (Keeping YOUR original scaling/coordinate logic)
+// 2. Verify OTP (Original Logic)
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
         const doc = await Document.findById(id);
-
         if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
 
         const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
@@ -1076,11 +1074,10 @@ app.post('/api/verify-otp', async (req, res) => {
         for (const sig of doc.signs) {
             const signatureData = doc.tempSignData[sig.id || sig._id];
             if (!signatureData) continue;
-
             const sigImg = await pdfDoc.embedPng(signatureData);
             const page = pdfDoc.getPages()[sig.page - 1];
             
-            // ✅ APNAR ORIGINAL COORDINATE LOGIC (Hath deini)
+            // ✅ APNAR ORIGINAL LOGIC
             page.drawImage(sigImg, { 
                 x: sig.x, 
                 y: page.getSize().height - sig.y - 50, 
@@ -1089,10 +1086,13 @@ app.post('/api/verify-otp', async (req, res) => {
             });
         }
 
-        const pdfBase64 = await pdfDoc.saveAsBase64({ dataUri: true });
         const pdfBuffer = await pdfDoc.save(); 
-        
-        doc.signedPdf = pdfBase64;
+        const b64Signed = Buffer.from(pdfBuffer).toString('base64');
+        const cldRes = await cloudinary.uploader.upload(`data:application/pdf;base64,${b64Signed}`, {
+            resource_type: "auto", folder: "signed_docs"
+        });
+
+        doc.signedPdf = cldRes.secure_url;
         doc.status = 'Signed';
         doc.otp = null; 
         doc.tempSignData = null;
@@ -1101,23 +1101,14 @@ app.post('/api/verify-otp', async (req, res) => {
         await transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: doc.signerEmail,
-            subject: `Agreement Signed: ${doc.name}`,
-            html: `<p>Thank you for signing <b>${doc.name}</b>.</p>`,
-            attachments: [{
-                filename: `Signed_${doc.name || 'Document'}.pdf`,
-                content: Buffer.from(pdfBuffer),
-                contentType: 'application/pdf'
-            }]
+            subject: `Signed: ${doc.name}`,
+            attachments: [{ filename: `Signed_${doc.name}.pdf`, content: Buffer.from(pdfBuffer) }]
         });
 
-        res.json({ pdf: pdfBase64 });
-    } catch (e) { 
-        console.error(e);
-        res.status(500).json({ error: "Verification failed" }); 
-    }
+        res.json({ pdf: cldRes.secure_url });
+    } catch (e) { res.status(500).json({ error: "Verification Failed" }); }
 });
 
-// Other routes (upload, doc, etc.)
 app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
     try {
         const b64 = Buffer.from(req.file.buffer).toString("base64");
@@ -1143,4 +1134,4 @@ app.get('/api/documents', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5011;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Port ${PORT}`));
