@@ -984,21 +984,20 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ Step 1: Payload limits for large PDF/Signature data
+// ✅ Step 1: Payload limits & CORS
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
-// Cloudinary
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ Step 2: Optimized Production Mailer (Gmail Service)
+// ✅ Step 2: Optimized Gmail Transporter
 const transporter = nodemailer.createTransport({
-  service: 'gmail', // Standard for Production Gmail
+  service: 'gmail', 
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS // ⚠️ Must be 16-digit App Password
@@ -1020,11 +1019,11 @@ const documentSchema = new mongoose.Schema({
 
 const Document = mongoose.model('Document', documentSchema);
 
-mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected"));
+mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected Successfully"));
 
-// --- ROUTES ---
+// --- API ROUTES ---
 
-// 1. Submit Sign & Send OTP
+// 1. Submit Sign (OTP Send Logic)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1036,41 +1035,43 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             tempSignData: signaturesMap
         });
 
-        // ✅ Step 3: Send Mail in Background (Don't 'await' it)
-        // Ete kore mail slow thakleo frontend loading-e stuck hobe na
+        // ✅ Step 3: Log Fallback (Production Testing-er jonno)
+        // Jodi mail na-o jay, Render Logs-e ei code-ta dekhabe
+        console.log("-----------------------------------------");
+        console.log(`🚀 VERIFICATION CODE FOR ${email} IS: ${otpCode}`);
+        console.log("-----------------------------------------");
+
+        // Background email sending (Non-blocking)
         transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
-            subject: "Verification Code for Document Signing",
-            html: `<div style="font-family: Arial; padding: 20px; border: 1px solid #eee; border-radius: 10px; text-align: center;">
-                    <h2 style="color: #0284c7;">FixenSysign OTP</h2>
-                    <p>Your verification code is:</p>
-                    <h1 style="letter-spacing: 5px; color: #333;">${otpCode}</h1>
-                    <p style="font-size: 12px; color: #888;">If you didn't request this, please ignore.</p>
+            subject: "FixenSysign: Your Verification Code",
+            html: `<div style="text-align:center; padding:20px; font-family:sans-serif; border:1px solid #ddd; border-radius:10px;">
+                    <h2 style="color:#0284c7;">Verification Code: ${otpCode}</h2>
+                    <p>Use this code to complete your document signature.</p>
                    </div>`
-        }).then(() => console.log(`✅ OTP Sent to ${email}`))
-          .catch(err => console.error("❌ Mail Transport Error:", err.message));
+        }).then(() => console.log(`✅ Mail Sent to ${email}`))
+          .catch(err => console.error("❌ SMTP Error:", err.message));
 
-        // Response pathiye frontend loading off kora
-        res.status(200).json({ success: true, message: "OTP Sent" });
+        // Instant response jate frontend stuck na hoy
+        return res.json({ success: true, message: "OTP Processed" });
 
     } catch (e) {
-        console.error("Submit Error:", e.message);
+        console.error("Submit Route Error:", e.message);
         res.status(500).json({ error: "Internal Server Error" });
     }
 });
 
-// 2. Verify OTP & Process PDF
+// 2. Verify OTP & Merge PDF
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
         const doc = await Document.findById(id);
 
         if (!doc || doc.otp !== otp) {
-            return res.status(400).json({ error: "Invalid Verification Code" });
+            return res.status(400).json({ error: "Invalid OTP Code" });
         }
 
-        // PDF Processing
         const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
         const pdfDoc = await PDFDocument.load(pdfBytes);
         
@@ -1090,8 +1091,6 @@ app.post('/api/verify-otp', async (req, res) => {
 
         const pdfBuffer = await pdfDoc.save(); 
         const b64Signed = Buffer.from(pdfBuffer).toString('base64');
-        
-        // Upload to Cloudinary
         const cldRes = await cloudinary.uploader.upload(`data:application/pdf;base64,${b64Signed}`, {
             resource_type: "auto", folder: "signed_docs"
         });
@@ -1104,12 +1103,12 @@ app.post('/api/verify-otp', async (req, res) => {
 
         res.json({ pdf: cldRes.secure_url });
     } catch (e) { 
-        console.error(e);
-        res.status(500).json({ error: "PDF Processing Failed" }); 
+        console.error("Verification Error:", e);
+        res.status(500).json({ error: "Failed to merge PDF" }); 
     }
 });
 
-// Other Admin Routes
+// Other API Routes (Upload, etc)
 app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
     try {
         const b64 = Buffer.from(req.file.buffer).toString("base64");
