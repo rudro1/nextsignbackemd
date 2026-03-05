@@ -979,11 +979,12 @@ const multer = require('multer');
 const cors = require('cors');
 const axios = require('axios');
 const nodemailer = require('nodemailer');
-const { PDFDocument, rgb } = require('pdf-lib'); // rgb add kora holo
+const { PDFDocument } = require('pdf-lib');
 const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
+// ✅ CORS & Payload Limits
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -994,14 +995,16 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ Stable SMTP (Port 465)
+// ✅ SSL SMTP for Render (Port 465)
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true, 
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS 
+    pass: process.env.EMAIL_PASS // zubkyznszbazgbqj
   },
-  connectionTimeout: 30000 // 30 seconds
+  tls: { rejectUnauthorized: false }
 });
 
 const Document = mongoose.model('Document', new mongoose.Schema({
@@ -1012,7 +1015,7 @@ const Document = mongoose.model('Document', new mongoose.Schema({
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected"));
 
-// 1. Submit Sign (OTP)
+// 1. Submit Sign (OTP Send)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1025,14 +1028,18 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code: " + otpCode,
-            html: `<h3>Your Code: ${otpCode}</h3>`
+            html: `<div style="text-align:center; padding:20px; border:1px solid #ddd; border-radius:10px; font-family:sans-serif;">
+                    <h2 style="color:#0284c7;">FixenSysign OTP</h2>
+                    <h1 style="letter-spacing:5px;">${otpCode}</h1>
+                    <p>Enter this code to sign your document.</p>
+                   </div>`
         }).catch(err => console.error("❌ Mail Error:", err.message));
 
         res.status(200).json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. Verify OTP & Merge PDF (Fixing Black Box)
+// 2. Verify OTP, Merge & Send Attachment
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
@@ -1046,7 +1053,7 @@ app.post('/api/verify-otp', async (req, res) => {
             const signatureData = doc.tempSignData[sig.id || sig._id];
             if (!signatureData) continue;
 
-            // ✅ Handling Image Format & Embedding
+            // ✅ Black Box Fix: Using PNG and Auto-detection
             let sigImg;
             if (signatureData.includes('image/png')) {
                 sigImg = await pdfDoc.embedPng(signatureData);
@@ -1055,12 +1062,11 @@ app.post('/api/verify-otp', async (req, res) => {
             }
 
             const page = pdfDoc.getPages()[sig.page - 1];
-            const { height } = page.getSize();
+            const { height, width } = page.getSize();
             
-            // ✅ Fix: Drawing with explicit dimensions to avoid black box
             page.drawImage(sigImg, { 
-                x: (sig.x * page.getWidth()) / 600, // Ratio maintain kora holo
-                y: height - ((sig.y * page.getHeight()) / 600) - 50, 
+                x: (sig.x * width) / 600, 
+                y: height - ((sig.y * height) / 600) - 50, 
                 width: 150, 
                 height: 50 
             });
@@ -1078,14 +1084,20 @@ app.post('/api/verify-otp', async (req, res) => {
         doc.tempSignData = null;
         await doc.save();
 
+        // ✅ Final Signed PDF Attachment to Email
+        transporter.sendMail({
+            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
+            to: doc.signerEmail,
+            subject: "Your Signed Document",
+            text: "Please find your signed document attached.",
+            attachments: [{ filename: 'signed_document.pdf', content: pdfBuffer }]
+        }).catch(err => console.error("❌ Attachment Mail Error:", err.message));
+
         res.json({ pdf: cldRes.secure_url });
-    } catch (e) { 
-        console.error("Verification Error:", e.message);
-        res.status(500).json({ error: "Merge failed: " + e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- Other Admin Routes ---
+// Admin Routes (Upload PDF etc.)
 app.post('/api/upload-pdf', multer({ storage: multer.memoryStorage() }).single('pdfFile'), async (req, res) => {
     const b64 = Buffer.from(req.file.buffer).toString("base64");
     const cldRes = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${b64}`, { resource_type: "auto", folder: "fixensy" });
@@ -1109,4 +1121,4 @@ app.get('/api/documents', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5011;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on Port ${PORT}`));
