@@ -984,7 +984,7 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ FIX 1: Increase JSON limit to handle large signatures
+// ✅ FIX 1: Body parser limit (Must for Base64 Signatures)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -1000,18 +1000,16 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ FIX 2: Better Mail Transporter for Render (Using Port 587)
+// ✅ FIX 2: Stable SMTP for Render (Port 587)
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 587,
-  secure: false, // Port 587 er jonno false thakte hobe
+  secure: false,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS 
   },
-  tls: {
-    rejectUnauthorized: false // Connection block hobe na
-  }
+  tls: { rejectUnauthorized: false }
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -1033,7 +1031,7 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ DB Connected"))
   .catch(err => console.error("❌ DB Error:", err));
 
-// 1. Submit Sign (OTP)
+// 1. Submit Sign (OTP Send)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1045,19 +1043,17 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             tempSignData: signaturesMap
         });
 
-        // OTP Send
         await transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code",
-            text: `Your code is ${otpCode}`,
-            html: `<b>Code: ${otpCode}</b>`
+            html: `<div style="text-align:center;"><h2>OTP: ${otpCode}</h2></div>`
         });
 
         res.json({ message: "OTP Sent" });
     } catch (e) { 
-        console.error("Submit Error:", e.message);
-        res.status(500).json({ error: "Email failed", detail: e.message }); 
+        console.error("Mail Error:", e.message);
+        res.status(500).json({ error: "Failed to send OTP" }); 
     }
 });
 
@@ -1106,9 +1102,10 @@ app.post('/api/verify-otp', async (req, res) => {
         });
 
         res.json({ pdf: cldRes.secure_url });
-    } catch (e) { res.status(500).json({ error: "Verification Failed" }); }
+    } catch (e) { res.status(500).json({ error: "Verification failed" }); }
 });
 
+// Admin Routes
 app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
     try {
         const b64 = Buffer.from(req.file.buffer).toString("base64");
