@@ -972,25 +972,64 @@
 
 
 
-// ✅ FIX: Gmail SMTP Connection logic change koren
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465, // Port 465 use korchi Render-er jonno beshi stable
-  secure: true, // 465 hole eita true hobe
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS 
-  },
-  // ✅ Connection timeout bariye dilam jate stuck na hoy
-  connectionTimeout: 10000, 
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-  tls: {
-    rejectUnauthorized: false 
-  }
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const multer = require('multer');
+const cors = require('cors');
+const axios = require('axios');
+const nodemailer = require('nodemailer'); // ✅ Eita miss chilo tai ReferenceError asche
+const { PDFDocument } = require('pdf-lib');
+const cloudinary = require('cloudinary').v2;
+
+const app = express();
+
+// Payload Limits (Boro signature data handle korar jonno)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(cors());
+
+// Cloudinary Config
+cloudinary.config({ 
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
+  api_key: process.env.CLOUDINARY_API_KEY, 
+  api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// 1. Submit Sign (OTP Send) - Error details shoho
+// ✅ SMTP Config (Port 465 + Secure for Render)
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+  auth: {
+    user: process.env.EMAIL_USER, // e.g. rudro@gmail.com
+    pass: process.env.EMAIL_PASS  // 16-digit Google App Password
+  },
+  tls: { rejectUnauthorized: false }
+});
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Database Schema
+const documentSchema = new mongoose.Schema({
+  pdfPath: String,
+  signedPdf: String, 
+  signs: Array, 
+  name: String,
+  signerEmail: String,
+  status: { type: String, default: 'Pending' },
+  otp: String,
+  tempSignData: Object 
+}, { timestamps: true });
+
+const Document = mongoose.model('Document', documentSchema);
+
+// DB Connection
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ DB Connected Successfully"))
+  .catch(err => console.log("❌ DB Error:", err));
+
+// 1. Submit Sign Route (OTP Send)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1002,24 +1041,101 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             tempSignData: signaturesMap
         });
 
-        // ✅ Email-ke verify kora charai try-catch e pathalam
-        try {
-            await transporter.sendMail({
-                from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
-                to: email,
-                subject: "Verification Code",
-                text: `Code: ${otpCode}`,
-                html: `<h2>OTP: ${otpCode}</h2>`
-            });
-            return res.json({ message: "OTP Sent" });
-        } catch (mailErr) {
-            console.error("STRICT MAIL ERROR:", mailErr.message);
-            // Email jodi na o jay, otp ta database theke dekhano jabe jodi test korte chan
-            return res.status(500).json({ error: "Email timeout! Check App Password." });
-        }
+        // OTP Mail
+        await transporter.sendMail({
+            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
+            to: email,
+            subject: "Your Verification Code",
+            html: `<div style="padding:20px; font-family:sans-serif; border:1px solid #eee;">
+                    <h2>OTP: ${otpCode}</h2>
+                    <p>Enter this code to verify and sign the document.</p>
+                   </div>`
+        });
 
-    } catch (e) { 
-        console.error("DB Error:", e.message);
-        res.status(500).json({ error: "Database error" }); 
+        res.json({ message: "OTP Sent" });
+    } catch (e) {
+        console.error("Submit Error:", e.message);
+        res.status(500).json({ error: "Failed to send OTP. Check App Password." });
     }
 });
+
+// 2. Verify OTP & PDF Merge (Apnar Original Logic)
+app.post('/api/verify-otp', async (req, res) => {
+    try {
+        const { id, otp } = req.body;
+        const doc = await Document.findById(id);
+        if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
+
+        const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        
+        for (const sig of doc.signs) {
+            const signatureData = doc.tempSignData[sig.id || sig._id];
+            if (!signatureData) continue;
+            const sigImg = await pdfDoc.embedPng(signatureData);
+            const page = pdfDoc.getPages()[sig.page - 1];
+            
+            // ✅ Keeping your coordinate logic untouched
+            page.drawImage(sigImg, { 
+                x: sig.x, 
+                y: page.getSize().height - sig.y - 50, 
+                width: 150, 
+                height: 50 
+            });
+        }
+
+        const pdfBuffer = await pdfDoc.save(); 
+        const b64Signed = Buffer.from(pdfBuffer).toString('base64');
+        const cldRes = await cloudinary.uploader.upload(`data:application/pdf;base64,${b64Signed}`, {
+            resource_type: "auto", folder: "signed_docs"
+        });
+
+        doc.signedPdf = cldRes.secure_url;
+        doc.status = 'Signed';
+        doc.otp = null; 
+        doc.tempSignData = null;
+        await doc.save();
+
+        // Final Signed Document Email
+        await transporter.sendMail({
+            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
+            to: doc.signerEmail,
+            subject: `Signed: ${doc.name}`,
+            text: "Please find your signed document attached.",
+            attachments: [{ filename: `Signed_${doc.name}.pdf`, content: Buffer.from(pdfBuffer) }]
+        });
+
+        res.json({ pdf: cldRes.secure_url });
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Verification Failed" }); 
+    }
+});
+
+// Admin API Routes
+app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
+    try {
+        const b64 = Buffer.from(req.file.buffer).toString("base64");
+        const cldRes = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${b64}`, { resource_type: "auto", folder: "fixensy" });
+        res.json({ pdfPath: cldRes.secure_url });
+    } catch (e) { res.status(500).json({ error: "Upload failed" }); }
+});
+
+app.post('/api/generate-link', async (req, res) => {
+    const newDoc = new Document(req.body);
+    await newDoc.save();
+    res.json({ id: newDoc._id });
+});
+
+app.get('/api/doc/:id', async (req, res) => {
+    const doc = await Document.findById(req.params.id);
+    res.json(doc);
+});
+
+app.get('/api/documents', async (req, res) => {
+    const docs = await Document.find().sort({ createdAt: -1 });
+    res.json(docs);
+});
+
+const PORT = process.env.PORT || 5011;
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Port ${PORT}`));
