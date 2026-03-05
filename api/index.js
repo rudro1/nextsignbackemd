@@ -1277,42 +1277,56 @@
 // });
 
 // // ✅ Export for Vercel
-// module.exports = app;
-
-const express = require('express');
+// module.exports = app;const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
+// Import your routes here
+// const documentRoutes = require('./routes/documents'); 
+
 dotenv.config();
 const app = express();
 
-// ✅ CORS Configuration Fixed
-const allowedOrigins = [
-  'https://nextsignfrontend-aeo8-git-main-bisal-sahas-projects.vercel.app',
-  'http://localhost:3000' // Local testing er jonno
-];
+// ✅ 1. MANUAL CORS HEADERS (Shobar age thakbe)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    'https://nextsignfrontend-aeo8-git-main-bisal-sahas-projects.vercel.app',
+    'http://localhost:3000'
+  ];
+  
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
+  // Handle Preflight (OPTIONS request)
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
-// ✅ Pre-flight request handle (Very Important for Uploads)
-app.options('*', cors());
+app.use(express.json({ limit: '10mb' })); // Higher limit for PDF strings
 
-app.use(express.json());
+// ✅ 2. CONNECT DATABASE
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("DB Connected"))
+  .catch(err => console.error("DB Error:", err));
 
-// Routes and DB connection gulo niche thakbe...
-// mongoose.connect(process.env.MONGO_URI)...
-// app.use('/api', routes)...
+// ✅ 3. ROUTES
+// app.use('/api', documentRoutes); 
+
+app.get('/', (req, res) => res.send("Fixensy API is Running..."));
+
+// Error Handler
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
 
 module.exports = app;
