@@ -984,14 +984,8 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ FIX 1: CORS Policy (Allows your Vercel frontend to talk to Render)
-app.use(cors({
-  origin: '*', // Production-e nishchinto thakar jonno '*' use kora hoyeche
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// ✅ FIX 2: Payload limits (For large PDF & Signatures)
+// ✅ CORS & Payload Limits
+app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -1002,12 +996,12 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ FIX 3: Optimized Gmail Transporter (Production Style)
+// ✅ Gmail Transporter
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS // ⚠️ Must be 16-digit App Password
+    pass: process.env.EMAIL_PASS 
   }
 });
 
@@ -1027,13 +1021,11 @@ const documentSchema = new mongoose.Schema({
 
 const Document = mongoose.model('Document', documentSchema);
 
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ DB Connected Successfully"))
-  .catch(err => console.error("❌ DB Connection Error:", err));
+mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected"));
 
 // --- API ROUTES ---
 
-// 1. Submit Sign & Send OTP
+// 1. Submit Sign (OTP Send)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
@@ -1045,37 +1037,28 @@ app.post('/api/submit-sign/:id', async (req, res) => {
             tempSignData: signaturesMap
         });
 
-        // ✅ Log Fallback: Email timeout holeo Render logs theke OTP paben
         console.log(`🚀 [OTP LOG] Email: ${email} | Code: ${otpCode}`);
 
-        // Async Email (Stuck hobe na)
         transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code: " + otpCode,
-            html: `<div style="font-family:sans-serif; padding:20px; border:1px solid #eee; border-radius:10px; text-align:center;">
-                    <h2 style="color:#0284c7;">FixenSysign OTP</h2>
-                    <p>Use the code below to sign your document:</p>
-                    <h1 style="color:#333; letter-spacing:5px;">${otpCode}</h1>
+            html: `<div style="text-align:center; padding:20px; border:1px solid #ddd; border-radius:10px;">
+                    <h2>Code: ${otpCode}</h2>
                    </div>`
-        }).catch(err => console.error("❌ Async Mail Error:", err.message));
+        }).catch(err => console.error("❌ Mail Error:", err.message));
 
         res.status(200).json({ success: true });
-    } catch (e) {
-        console.error("Submit Route Error:", e.message);
-        res.status(500).json({ error: "Server Error" });
-    }
+    } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
 
-// 2. Verify OTP & Merge PDF
+// 2. Verify OTP & Merge PDF (FIXED FOR PNG/JPG ERROR)
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
         const doc = await Document.findById(id);
 
-        if (!doc || doc.otp !== otp) {
-            return res.status(400).json({ error: "Invalid OTP" });
-        }
+        if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
 
         const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
         const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -1083,12 +1066,21 @@ app.post('/api/verify-otp', async (req, res) => {
         for (const sig of doc.signs) {
             const signatureData = doc.tempSignData[sig.id || sig._id];
             if (!signatureData) continue;
-            const sigImg = await pdfDoc.embedPng(signatureData);
+
+            // ✅ FIX: Image format detect kore embed kora
+            let sigImg;
+            if (signatureData.includes('image/jpeg') || signatureData.includes('image/jpg')) {
+                sigImg = await pdfDoc.embedJpg(signatureData); // JPEG handle
+            } else {
+                sigImg = await pdfDoc.embedPng(signatureData); // PNG handle
+            }
+
             const page = pdfDoc.getPages()[sig.page - 1];
+            const { height } = page.getSize();
             
             page.drawImage(sigImg, { 
                 x: sig.x, 
-                y: page.getSize().height - sig.y - 50, 
+                y: height - sig.y - 50, 
                 width: 150, 
                 height: 50 
             });
@@ -1108,28 +1100,20 @@ app.post('/api/verify-otp', async (req, res) => {
 
         res.json({ pdf: cldRes.secure_url });
     } catch (e) { 
-        console.error(e);
-        res.status(500).json({ error: "Merge failed" }); 
+        console.error("Verification Error:", e.message);
+        res.status(500).json({ error: "Merge failed: " + e.message }); 
     }
 });
 
-// 3. Admin: Upload PDF
+// Admin Routes
 app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
     try {
-        if (!req.file) return res.status(400).json({ error: "No file uploaded" });
         const b64 = Buffer.from(req.file.buffer).toString("base64");
-        const cldRes = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${b64}`, { 
-            resource_type: "auto", 
-            folder: "fixensy" 
-        });
+        const cldRes = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${b64}`, { resource_type: "auto", folder: "fixensy" });
         res.json({ pdfPath: cldRes.secure_url });
-    } catch (e) { 
-        console.error(e);
-        res.status(500).json({ error: "Upload failed" }); 
-    }
+    } catch (e) { res.status(500).json({ error: "Upload failed" }); }
 });
 
-// 4. Admin: Generate Link
 app.post('/api/generate-link', async (req, res) => {
     const newDoc = new Document(req.body);
     await newDoc.save();
@@ -1147,4 +1131,4 @@ app.get('/api/documents', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5011;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Port ${PORT}`));
