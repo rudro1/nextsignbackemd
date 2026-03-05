@@ -1278,75 +1278,190 @@
 
 // // ✅ Export for Vercel
 // module.exports = app;const express = require('express');
-const express = require('express'); // 👈 Eita missing chhilo!
+require('dotenv').config();
+const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
+const axios = require('axios');
+const nodemailer = require('nodemailer');
+const { PDFDocument } = require('pdf-lib');
+const cloudinary = require('cloudinary').v2;
 
-// Routes import (Jodi thake)
-// const documentRoutes = require('./routes/documents'); 
-
-dotenv.config();
 const app = express();
 
-// ✅ 1. MANUAL CORS HEADERS (Must be first)
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const allowedOrigins = [
-    'https://nextsignfrontend-aeo8-git-main-bisal-sahas-projects.vercel.app',
-    'http://localhost:3000'
-  ];
-  
-  if (allowedOrigins && allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (!origin) {
-    // For non-browser requests
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+// ✅ 1. Advanced CORS for Vercel
+app.use(cors({
+    origin: "*", 
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 
-  // Handle Preflight (OPTIONS request)
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  next();
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// ✅ 2. Cloudinary Config
+cloudinary.config({ 
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
+  api_key: process.env.CLOUDINARY_API_KEY, 
+  api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// JSON parsing with limit
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// ✅ 3. DB Connection (Serverless optimized)
+let isConnected = false;
+const connectDB = async () => {
+    if (isConnected) return;
+    try {
+        mongoose.set('strictQuery', true);
+        await mongoose.connect(process.env.MONGO_URI);
+        isConnected = true;
+        console.log("✅ DB Connected");
+    } catch (err) {
+        console.error("❌ DB Error:", err.message);
+    }
+};
 
-// ✅ 2. CONNECT DATABASE
-if (process.env.MONGO_URI) {
-    mongoose.connect(process.env.MONGO_URI)
-      .then(() => console.log("✅ MongoDB Connected Successfully"))
-      .catch(err => console.error("❌ MongoDB Connection Error:", err));
-} else {
-    console.error("❌ MONGO_URI is not defined in Environment Variables");
-}
+// ✅ 4. Schema & Model
+const documentSchema = new mongoose.Schema({
+  pdfPath: String, 
+  signedPdf: String, 
+  signs: Array, 
+  name: String,
+  signerEmail: String, 
+  status: { type: String, default: 'Pending' },
+  otp: String, 
+  tempSignData: Object 
+}, { timestamps: true });
 
-// ✅ 3. ROUTES
-// app.use('/api', documentRoutes); 
+const Document = mongoose.models.Document || mongoose.model('Document', documentSchema);
 
-app.get('/', (req, res) => {
-  res.status(200).json({ message: "Fixensy API is Running Smoothly!" });
+// ✅ 5. API Routes
+
+// Dashboard - Fetch All Docs
+app.get('/api/documents', async (req, res) => {
+    try {
+        await connectDB();
+        const docs = await Document.find().sort({ createdAt: -1 }).lean();
+        res.status(200).json(docs);
+    } catch (e) {
+        res.status(500).json({ error: "Fetch failed" });
+    }
 });
 
-// Health check route for frontend to test connection
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: "ok", origin: req.headers.origin });
+// Generate Link (Save URL from Frontend)
+app.post('/api/generate-link', async (req, res) => {
+    try {
+        await connectDB();
+        const newDoc = new Document(req.body);
+        const saved = await newDoc.save();
+        res.status(200).json({ id: saved._id });
+    } catch (e) {
+        res.status(500).json({ error: "Link generation failed" });
+    }
 });
 
-// Global Error Handler
-app.use((err, req, res, next) => {
-  console.error("🔥 Server Error:", err.stack);
-  res.status(500).json({ 
-    error: 'Internal Server Error',
-    message: err.message 
-  });
+// Get Single Doc for Signing
+app.get('/api/doc/:id', async (req, res) => {
+    try {
+        await connectDB();
+        const doc = await Document.findById(req.params.id);
+        res.json(doc);
+    } catch (e) {
+        res.status(404).json({ error: "Not found" });
+    }
 });
 
-module.exports = app;
+// Submit Sign & Send OTP
+app.post('/api/submit-sign/:id', async (req, res) => {
+    try {
+        await connectDB();
+        const { signaturesMap, email } = req.body;
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        await Document.findByIdAndUpdate(req.params.id, {
+            signerEmail: email, otp: otpCode, tempSignData: signaturesMap
+        });
+
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+        });
+
+        await transporter.sendMail({
+            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
+            to: email,
+            subject: "Verification Code: " + otpCode,
+            html: `<h2>OTP: ${otpCode}</h2>`
+        });
+
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Verify OTP & Process PDF (The Big Logic)
+app.post('/api/verify-otp', async (req, res) => {
+    try {
+        await connectDB();
+        const { id, otp } = req.body;
+        const doc = await Document.findById(id);
+
+        if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
+
+        // Download PDF to memory
+        const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        
+        for (const sig of doc.signs) {
+            const signatureData = doc.tempSignData[sig.id || sig._id];
+            if (!signatureData) continue;
+
+            const sigImg = signatureData.includes('image/png') ? 
+                           await pdfDoc.embedPng(signatureData) : 
+                           await pdfDoc.embedJpg(signatureData);
+
+            const page = pdfDoc.getPages()[sig.page - 1];
+            const { height, width } = page.getSize();
+            
+            // Coordinate mapping (Frontend logic matching)
+            page.drawImage(sigImg, { 
+                x: (sig.x * width) / 600, 
+                y: height - ((sig.y * height) / 600) - 50, 
+                width: 150, height: 50 
+            });
+        }
+
+        const pdfBuffer = await pdfDoc.save(); 
+        const b64Signed = Buffer.from(pdfBuffer).toString('base64');
+        
+        // Upload signed PDF back to Cloudinary
+        const cldRes = await cloudinary.uploader.upload(`data:application/pdf;base64,${b64Signed}`, {
+            resource_type: "auto", folder: "signed_docs"
+        });
+
+        doc.signedPdf = cldRes.secure_url;
+        doc.status = 'Signed';
+        doc.otp = null; 
+        await doc.save();
+
+        // Send Final Email
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+        });
+
+        await transporter.sendMail({
+            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
+            to: doc.signerEmail,
+            subject: 'Document Signed Successfully',
+            attachments: [{ filename: 'Signed_Doc.pdf', content: pdfBuffer }],
+            html: '<p>Attached is your signed document.</p>'
+        });
+
+        res.json({ pdf: cldRes.secure_url });
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    }
+});
+
+const PORT = process.env.PORT || 5011;
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on port ${PORT}`));
