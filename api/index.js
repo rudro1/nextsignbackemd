@@ -1278,17 +1278,18 @@
 
 // // ✅ Export for Vercel
 // module.exports = app;const express = require('express');
+const express = require('express'); // 👈 Eita missing chhilo!
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
-// Import your routes here
+// Routes import (Jodi thake)
 // const documentRoutes = require('./routes/documents'); 
 
 dotenv.config();
 const app = express();
 
-// ✅ 1. MANUAL CORS HEADERS (Shobar age thakbe)
+// ✅ 1. MANUAL CORS HEADERS (Must be first)
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowedOrigins = [
@@ -1296,8 +1297,11 @@ app.use((req, res, next) => {
     'http://localhost:3000'
   ];
   
-  if (allowedOrigins.includes(origin)) {
+  if (allowedOrigins && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    // For non-browser requests
+    res.setHeader('Access-Control-Allow-Origin', '*');
   }
   
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -1311,22 +1315,38 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '10mb' })); // Higher limit for PDF strings
+// JSON parsing with limit
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ✅ 2. CONNECT DATABASE
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("DB Connected"))
-  .catch(err => console.error("DB Error:", err));
+if (process.env.MONGO_URI) {
+    mongoose.connect(process.env.MONGO_URI)
+      .then(() => console.log("✅ MongoDB Connected Successfully"))
+      .catch(err => console.error("❌ MongoDB Connection Error:", err));
+} else {
+    console.error("❌ MONGO_URI is not defined in Environment Variables");
+}
 
 // ✅ 3. ROUTES
 // app.use('/api', documentRoutes); 
 
-app.get('/', (req, res) => res.send("Fixensy API is Running..."));
+app.get('/', (req, res) => {
+  res.status(200).json({ message: "Fixensy API is Running Smoothly!" });
+});
 
-// Error Handler
+// Health check route for frontend to test connection
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: "ok", origin: req.headers.origin });
+});
+
+// Global Error Handler
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Something went wrong!' });
+  console.error("🔥 Server Error:", err.stack);
+  res.status(500).json({ 
+    error: 'Internal Server Error',
+    message: err.message 
+  });
 });
 
 module.exports = app;
