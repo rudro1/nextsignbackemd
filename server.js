@@ -979,85 +979,64 @@ const multer = require('multer');
 const cors = require('cors');
 const axios = require('axios');
 const nodemailer = require('nodemailer');
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, rgb } = require('pdf-lib'); // rgb add kora holo
 const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ CORS & Payload Limits
-app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
+app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Cloudinary Config
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ Gmail Transporter
+// ✅ Stable SMTP (Port 465)
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS 
-  }
+  },
+  connectionTimeout: 30000 // 30 seconds
 });
 
-const upload = multer({ storage: multer.memoryStorage() });
-
-// Database Schema
-const documentSchema = new mongoose.Schema({
-  pdfPath: String,
-  signedPdf: String, 
-  signs: Array, 
-  name: String,
-  signerEmail: String,
-  status: { type: String, default: 'Pending' },
-  otp: String,
-  tempSignData: Object 
-}, { timestamps: true });
-
-const Document = mongoose.model('Document', documentSchema);
+const Document = mongoose.model('Document', new mongoose.Schema({
+  pdfPath: String, signedPdf: String, signs: Array, name: String,
+  signerEmail: String, status: { type: String, default: 'Pending' },
+  otp: String, tempSignData: Object 
+}, { timestamps: true }));
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ DB Connected"));
 
-// --- API ROUTES ---
-
-// 1. Submit Sign (OTP Send)
+// 1. Submit Sign (OTP)
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         const { signaturesMap, email } = req.body;
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        await Document.findByIdAndUpdate(req.params.id, { signerEmail: email, otp: otpCode, tempSignData: signaturesMap });
 
-        await Document.findByIdAndUpdate(req.params.id, {
-            signerEmail: email,
-            otp: otpCode,
-            tempSignData: signaturesMap
-        });
-
-        console.log(`🚀 [OTP LOG] Email: ${email} | Code: ${otpCode}`);
+        console.log(`🚀 [OTP LOG] Code: ${otpCode} for ${email}`);
 
         transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code: " + otpCode,
-            html: `<div style="text-align:center; padding:20px; border:1px solid #ddd; border-radius:10px;">
-                    <h2>Code: ${otpCode}</h2>
-                   </div>`
+            html: `<h3>Your Code: ${otpCode}</h3>`
         }).catch(err => console.error("❌ Mail Error:", err.message));
 
         res.status(200).json({ success: true });
-    } catch (e) { res.status(500).json({ error: "Server Error" }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. Verify OTP & Merge PDF (FIXED FOR PNG/JPG ERROR)
+// 2. Verify OTP & Merge PDF (Fixing Black Box)
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { id, otp } = req.body;
         const doc = await Document.findById(id);
-
         if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
 
         const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
@@ -1067,20 +1046,21 @@ app.post('/api/verify-otp', async (req, res) => {
             const signatureData = doc.tempSignData[sig.id || sig._id];
             if (!signatureData) continue;
 
-            // ✅ FIX: Image format detect kore embed kora
+            // ✅ Handling Image Format & Embedding
             let sigImg;
-            if (signatureData.includes('image/jpeg') || signatureData.includes('image/jpg')) {
-                sigImg = await pdfDoc.embedJpg(signatureData); // JPEG handle
+            if (signatureData.includes('image/png')) {
+                sigImg = await pdfDoc.embedPng(signatureData);
             } else {
-                sigImg = await pdfDoc.embedPng(signatureData); // PNG handle
+                sigImg = await pdfDoc.embedJpg(signatureData);
             }
 
             const page = pdfDoc.getPages()[sig.page - 1];
             const { height } = page.getSize();
             
+            // ✅ Fix: Drawing with explicit dimensions to avoid black box
             page.drawImage(sigImg, { 
-                x: sig.x, 
-                y: height - sig.y - 50, 
+                x: (sig.x * page.getWidth()) / 600, // Ratio maintain kora holo
+                y: height - ((sig.y * page.getHeight()) / 600) - 50, 
                 width: 150, 
                 height: 50 
             });
@@ -1105,13 +1085,11 @@ app.post('/api/verify-otp', async (req, res) => {
     }
 });
 
-// Admin Routes
-app.post('/api/upload-pdf', upload.single('pdfFile'), async (req, res) => {
-    try {
-        const b64 = Buffer.from(req.file.buffer).toString("base64");
-        const cldRes = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${b64}`, { resource_type: "auto", folder: "fixensy" });
-        res.json({ pdfPath: cldRes.secure_url });
-    } catch (e) { res.status(500).json({ error: "Upload failed" }); }
+// --- Other Admin Routes ---
+app.post('/api/upload-pdf', multer({ storage: multer.memoryStorage() }).single('pdfFile'), async (req, res) => {
+    const b64 = Buffer.from(req.file.buffer).toString("base64");
+    const cldRes = await cloudinary.uploader.upload(`data:${req.file.mimetype};base64,${b64}`, { resource_type: "auto", folder: "fixensy" });
+    res.json({ pdfPath: cldRes.secure_url });
 });
 
 app.post('/api/generate-link', async (req, res) => {
