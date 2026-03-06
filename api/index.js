@@ -1289,20 +1289,18 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ 1. Simple & Effective CORS for Vercel
+// ✅ 1. CORS Configuration
 app.use(cors({
-    origin: true, // Sab origin allow korbe dynamic bhabe
+    origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
 
-// Handle OPTIONS Pre-flight
 app.options('*', cors());
-
 app.use(express.json({ limit: '50mb' }));
 
-// ✅ 2. Welcome Route (Fixes "Cannot GET /")
+// ✅ 2. Welcome Route
 app.get('/', (req, res) => {
     res.status(200).send('🚀 Fixensy Backend is Live and Running!');
 });
@@ -1342,8 +1340,7 @@ const documentSchema = new mongoose.Schema({
 
 const Document = mongoose.models.Document || mongoose.model('Document', documentSchema);
 
-// ✅ 3. API Routes (Check these in your Frontend api.js)
-
+// ✅ 3. API Routes
 app.get('/api/documents', async (req, res) => {
     try {
         await connectDB();
@@ -1449,5 +1446,5 @@ app.post('/api/verify-otp', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 5011;
-app.listen(PORT, () => console.log(`🚀 Server ready on port ${PORT}`));
+// ✅ 4. Vercel Export (আমি এখানে app.listen রিমুভ করেছি)
+module.exports = app;
