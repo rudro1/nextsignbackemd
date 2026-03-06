@@ -1289,33 +1289,46 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
+// ✅ 1. Simple & Effective CORS for Vercel
 app.use(cors({
-    origin: "*", 
+    origin: true, // Sab origin allow korbe dynamic bhabe
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Handle OPTIONS Pre-flight
+app.options('*', cors());
 
+app.use(express.json({ limit: '50mb' }));
+
+// ✅ 2. Welcome Route (Fixes "Cannot GET /")
+app.get('/', (req, res) => {
+    res.status(200).send('🚀 Fixensy Backend is Live and Running!');
+});
+
+// Cloudinary Config
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
+// DB Connection Logic
 let isConnected = false;
 const connectDB = async () => {
     if (isConnected) return;
     try {
+        mongoose.set('strictQuery', true);
         await mongoose.connect(process.env.MONGO_URI);
         isConnected = true;
+        console.log("✅ MongoDB Connected");
     } catch (err) {
-        console.error("DB Error:", err.message);
+        console.error("❌ DB Error:", err.message);
     }
 };
 
+// Schema
 const documentSchema = new mongoose.Schema({
   pdfPath: String, 
   signedPdf: String, 
@@ -1329,7 +1342,8 @@ const documentSchema = new mongoose.Schema({
 
 const Document = mongoose.models.Document || mongoose.model('Document', documentSchema);
 
-// API Routes
+// ✅ 3. API Routes (Check these in your Frontend api.js)
+
 app.get('/api/documents', async (req, res) => {
     try {
         await connectDB();
@@ -1400,7 +1414,6 @@ app.post('/api/verify-otp', async (req, res) => {
             const page = pdfDoc.getPages()[sig.page - 1];
             const { height, width } = page.getSize();
             
-            // Fixed Y-axis calculation for pdf-lib
             page.drawImage(sigImg, { 
                 x: (sig.x * width) / 600, 
                 y: height - ((sig.y * height) / (height * (600/width))) - 50, 
@@ -1424,15 +1437,17 @@ app.post('/api/verify-otp', async (req, res) => {
             auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
         });
         await transporter.sendMail({
-            from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
+            from: `"FixenSysign"`,
             to: doc.signerEmail,
             subject: 'Document Signed Successfully',
             attachments: [{ filename: 'Signed_Doc.pdf', content: pdfBuffer }],
             html: '<p>Attached is your signed document.</p>'
         });
         res.json({ pdf: cldRes.secure_url });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 const PORT = process.env.PORT || 5011;
-app.listen(PORT, () => console.log(`🚀 Server ready`));
+app.listen(PORT, () => console.log(`🚀 Server ready on port ${PORT}`));
