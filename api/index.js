@@ -1289,7 +1289,6 @@ const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// ✅ 1. Advanced CORS for Vercel
 app.use(cors({
     origin: "*", 
     credentials: true,
@@ -1300,28 +1299,23 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// ✅ 2. Cloudinary Config
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
   api_secret: process.env.CLOUDINARY_API_SECRET 
 });
 
-// ✅ 3. DB Connection (Serverless optimized)
 let isConnected = false;
 const connectDB = async () => {
     if (isConnected) return;
     try {
-        mongoose.set('strictQuery', true);
         await mongoose.connect(process.env.MONGO_URI);
         isConnected = true;
-        console.log("✅ DB Connected");
     } catch (err) {
-        console.error("❌ DB Error:", err.message);
+        console.error("DB Error:", err.message);
     }
 };
 
-// ✅ 4. Schema & Model
 const documentSchema = new mongoose.Schema({
   pdfPath: String, 
   signedPdf: String, 
@@ -1335,20 +1329,17 @@ const documentSchema = new mongoose.Schema({
 
 const Document = mongoose.models.Document || mongoose.model('Document', documentSchema);
 
-// ✅ 5. API Routes
-
-// Dashboard - Fetch All Docs
+// API Routes
 app.get('/api/documents', async (req, res) => {
     try {
         await connectDB();
         const docs = await Document.find().sort({ createdAt: -1 }).lean();
         res.status(200).json(docs);
     } catch (e) {
-        res.status(500).json({ error: "Fetch failed" });
+        res.status(500).json([]);
     }
 });
 
-// Generate Link (Save URL from Frontend)
 app.post('/api/generate-link', async (req, res) => {
     try {
         await connectDB();
@@ -1356,84 +1347,69 @@ app.post('/api/generate-link', async (req, res) => {
         const saved = await newDoc.save();
         res.status(200).json({ id: saved._id });
     } catch (e) {
-        res.status(500).json({ error: "Link generation failed" });
+        res.status(500).json({ error: "Fail" });
     }
 });
 
-// Get Single Doc for Signing
 app.get('/api/doc/:id', async (req, res) => {
     try {
         await connectDB();
         const doc = await Document.findById(req.params.id);
         res.json(doc);
     } catch (e) {
-        res.status(404).json({ error: "Not found" });
+        res.status(404).json(null);
     }
 });
 
-// Submit Sign & Send OTP
 app.post('/api/submit-sign/:id', async (req, res) => {
     try {
         await connectDB();
         const { signaturesMap, email } = req.body;
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-
         await Document.findByIdAndUpdate(req.params.id, {
             signerEmail: email, otp: otpCode, tempSignData: signaturesMap
         });
-
         const transporter = nodemailer.createTransport({
             service: 'gmail',
             auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
         });
-
         await transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: email,
             subject: "Verification Code: " + otpCode,
             html: `<h2>OTP: ${otpCode}</h2>`
         });
-
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Verify OTP & Process PDF (The Big Logic)
 app.post('/api/verify-otp', async (req, res) => {
     try {
         await connectDB();
         const { id, otp } = req.body;
         const doc = await Document.findById(id);
-
         if (!doc || doc.otp !== otp) return res.status(400).json({ error: "Invalid OTP" });
 
-        // Download PDF to memory
         const pdfBytes = await axios.get(doc.pdfPath, { responseType: 'arraybuffer' }).then(r => r.data);
         const pdfDoc = await PDFDocument.load(pdfBytes);
         
         for (const sig of doc.signs) {
             const signatureData = doc.tempSignData[sig.id || sig._id];
             if (!signatureData) continue;
-
-            const sigImg = signatureData.includes('image/png') ? 
-                           await pdfDoc.embedPng(signatureData) : 
-                           await pdfDoc.embedJpg(signatureData);
-
+            const sigImg = await pdfDoc.embedPng(signatureData);
             const page = pdfDoc.getPages()[sig.page - 1];
             const { height, width } = page.getSize();
             
-            // Coordinate mapping (Frontend logic matching)
+            // Fixed Y-axis calculation for pdf-lib
             page.drawImage(sigImg, { 
                 x: (sig.x * width) / 600, 
-                y: height - ((sig.y * height) / 600) - 50, 
-                width: 150, height: 50 
+                y: height - ((sig.y * height) / (height * (600/width))) - 50, 
+                width: 150 * (width/600), height: 50 * (width/600)
             });
         }
 
         const pdfBuffer = await pdfDoc.save(); 
         const b64Signed = Buffer.from(pdfBuffer).toString('base64');
-        
-        // Upload signed PDF back to Cloudinary
         const cldRes = await cloudinary.uploader.upload(`data:application/pdf;base64,${b64Signed}`, {
             resource_type: "auto", folder: "signed_docs"
         });
@@ -1443,12 +1419,10 @@ app.post('/api/verify-otp', async (req, res) => {
         doc.otp = null; 
         await doc.save();
 
-        // Send Final Email
         const transporter = nodemailer.createTransport({
             service: 'gmail',
             auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
         });
-
         await transporter.sendMail({
             from: `"FixenSysign" <${process.env.EMAIL_USER}>`,
             to: doc.signerEmail,
@@ -1456,12 +1430,9 @@ app.post('/api/verify-otp', async (req, res) => {
             attachments: [{ filename: 'Signed_Doc.pdf', content: pdfBuffer }],
             html: '<p>Attached is your signed document.</p>'
         });
-
         res.json({ pdf: cldRes.secure_url });
-    } catch (e) { 
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 const PORT = process.env.PORT || 5011;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server ready`));
